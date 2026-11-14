@@ -28,15 +28,20 @@ local autoShootTargetPart = "Cabeza"
 local silentAimManualEnabled = false
 local silentAimFovEnabled = false
 local silentAimTargetPart = "Cabeza"
-local macroShootEnabled = false
-local macroBusy = false
-local macroWeaponName = nil
-local macroLastShot = 0
-local MACRO_EQUIP_WAIT = 0
-local MACRO_UNEQUIP_DELAY = 0.1
-local MACRO_SHOT_COOLDOWN = 0.9
-local MACRO_PING_MARGIN = 0.04
-local MACRO_EXTRA_CLICK = false
+
+-- Macro (FER style: toque = equipar, disparar, guardar)
+local Macro = {
+    Enabled = false,
+    WeaponName = nil,
+    EquipWait = 0,
+    UnequipDelay = 0.1,
+    ShotCooldown = 0.9,
+    PingMargin = 0.04,
+    TouchOnly = true,
+    Busy = false,
+    LastShot = 0,
+}
+local MacroStatusLabel = nil
 local macroTouches = {}
 local teamCheckEnabled = true
 local espEnabled = false
@@ -1803,73 +1808,67 @@ task.spawn(function()
 end)
 
 
+
 Tabs.Aim:Space()
 Tabs.Aim:Divider()
 Tabs.Aim:Space()
 
-Tabs.Aim:Section({ Title = "Macro Shoot (Silent)", Icon = "solar:bolt-bold" })
+Tabs.Aim:Section({ Title = "Macro", Icon = "solar:bolt-bold" })
 
-UIElements.TogMacroShoot = Tabs.Aim:Toggle({
-    Title = "Macro Shoot",
-    Desc = "Como Auto Shoot: equipa, Silent Aim, dispara y guarda el arma en bucle.\nAVISO: solo en partida, no en lobby.",
+UIElements.TogMacro = Tabs.Aim:Toggle({
+    Title = "Macro activada",
+    Desc = "Equipa, dispara y guarda al tocar (estilo FER).\nAVISO: solo en partida.",
     Value = false,
-    Callback = function(Value)
-        macroShootEnabled = Value
-        if not Value then
-            macroBusy = false
-            if not silentAimManualEnabled and not silentAimFovEnabled and not autoShootEnabled and not autoShootAgresivoEnabled then
-                getgenv().CKOHUBTargetPart = nil
-            end
+    Callback = function(v)
+        Macro.Enabled = v
+        if not v then
+            Macro.Busy = false
+            if MacroStatusLabel then pcall(function() MacroStatusLabel:SetDesc("Inactiva") end) end
         end
     end
 })
 
-UIElements.SliMacroCooldown = Tabs.Aim:Slider({
-    Title = "Macro Cooldown",
-    Step = 0.05,
-    Value = { Min = 0.2, Max = 3, Default = 0.9 },
+UIElements.TogMacroTouch = Tabs.Aim:Toggle({
+    Title = "Solo toques",
+    Desc = "Off = también clic izquierdo",
+    Value = true,
     Callback = function(v)
-        MACRO_SHOT_COOLDOWN = v
+        Macro.TouchOnly = v
     end
 })
 
-UIElements.SliMacroUnequip = Tabs.Aim:Slider({
-    Title = "Macro Unequip Delay",
-    Step = 0.05,
-    Value = { Min = 0, Max = 1, Default = 0.1 },
-    Callback = function(v)
-        MACRO_UNEQUIP_DELAY = v
-    end
+MacroStatusLabel = Tabs.Aim:Paragraph({
+    Title = "Estado Macro",
+    Desc = "Inactiva",
 })
 
-local function macroIsKnifeName(name)
-    name = string.lower(tostring(name or ""))
-    return name:find("knife") or name:find("cuchillo") or name:find("blade") or name:find("dagger")
+local function SetMacroStatus(t)
+    if MacroStatusLabel then
+        pcall(function() MacroStatusLabel:SetDesc(t) end)
+    end
 end
 
-local function macroFindWeapon()
+local function macroEsCuchillo(name)
+    name = string.lower(tostring(name or ""))
+    return string.find(name, "knife") or string.find(name, "cuchillo")
+        or string.find(name, "blade") or string.find(name, "dagger")
+end
+
+local function macroBuscarArma()
     local backpack = player:FindFirstChildOfClass("Backpack")
-    local char = player.Character
-    if char then
-        for _, t in ipairs(char:GetChildren()) do
-            if t:IsA("Tool") and not macroIsKnifeName(t.Name) and (esPistola and esPistola(t) or true) then
-                if not macroIsKnifeName(t.Name) then
-                    local n = t.Name:lower()
-                    if n:find("gun") or n:find("revolver") or n:find("pistol") or n:find("arma") or n:find("sheriff") or (esPistola and esPistola(t)) then
-                        return t
-                    end
-                end
-            end
-        end
-    end
     if not backpack then return nil end
+    if Macro.WeaponName then
+        local fixed = backpack:FindFirstChild(Macro.WeaponName)
+        if fixed then return fixed end
+    end
     local gun = obtenerPistola and obtenerPistola() or nil
     if gun then return gun end
-    local fallback = nil
+    local fallback
     for _, t in ipairs(backpack:GetChildren()) do
-        if t:IsA("Tool") and not macroIsKnifeName(t.Name) then
-            local n = t.Name:lower()
-            if n:find("gun") or n:find("revolver") or n:find("pistol") or n:find("arma") or n:find("sheriff") then
+        if t:IsA("Tool") and not macroEsCuchillo(t.Name) then
+            local n = string.lower(t.Name)
+            if string.find(n, "gun") or string.find(n, "revolver") or string.find(n, "pistol")
+            or string.find(n, "arma") or string.find(n, "sheriff") then
                 return t
             end
             fallback = fallback or t
@@ -1878,136 +1877,172 @@ local function macroFindWeapon()
     return fallback
 end
 
-local function macroPickSilentTarget()
-    local char = player.Character
-    if not char then return nil end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
-    local head = char:FindFirstChild("Head")
-    local myPos = hrp.Position
-    local headPos = head and head.Position or myPos
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { char }
-    local closest, best = nil, math.huge
-    local partPref = silentAimTargetPart or "Cabeza"
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= player and esEnemigoValido(p) and p.Character then
-            local partes = {}
-            if partPref == "Cabeza" then
-                local h = p.Character:FindFirstChild("Head")
-                if h then table.insert(partes, h) end
-            elseif partPref == "Torso" then
-                for _, n in ipairs({ "UpperTorso", "Torso", "HumanoidRootPart" }) do
-                    local part = p.Character:FindFirstChild(n)
-                    if part and part:IsA("BasePart") then table.insert(partes, part) end
-                end
-            else
-                for _, part in ipairs(p.Character:GetChildren()) do
-                    if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                        table.insert(partes, part)
-                    end
-                end
-            end
-            for _, part in ipairs(partes) do
-                local dist = (part.Position - myPos).Magnitude
-                if dist < best then
-                    params.FilterDescendantsInstances = { char, p.Character }
-                    if not workspace:Raycast(headPos, part.Position - headPos, params) then
-                        best = dist
-                        closest = part
-                    end
-                end
-            end
-        end
-    end
-    return closest
+local function macroArmaLista(arma)
+    if not arma or not arma:IsA("Tool") then return false end
+    local backpack = player:FindFirstChildOfClass("Backpack")
+    if not backpack or arma.Parent ~= backpack then return false end
+    if arma.Enabled == false then return false end
+    if os.clock() - Macro.LastShot < Macro.ShotCooldown then return false end
+    return true
 end
 
--- Macro en bucle (como Auto Shoot): ON = trabaja solo
-task.spawn(function()
-    while true do
-        if not macroShootEnabled then
-            task.wait(0.15)
-            continue
-        end
-        if estaEnLobby and estaEnLobby() then
-            task.wait(0.3)
-            continue
-        end
-        if macroBusy then
-            task.wait(0.05)
-            continue
-        end
-        if os.clock() - macroLastShot < MACRO_SHOT_COOLDOWN then
-            task.wait(0.05)
-            continue
+local function macroEjecutar()
+    if Macro.Busy or not Macro.Enabled then return end
+    if estaEnLobby and estaEnLobby() then
+        SetMacroStatus("En lobby")
+        return
+    end
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    if char:FindFirstChildOfClass("Tool") then return end
+
+    local arma = macroBuscarArma()
+    if not macroArmaLista(arma) then
+        SetMacroStatus(arma and "Arma no lista" or "Arma no disponible")
+        return
+    end
+
+    Macro.Busy = true
+    local ok, err = pcall(function()
+        SetMacroStatus("Sacando " .. arma.Name)
+        hum:EquipTool(arma)
+        local t0 = os.clock()
+        while arma.Parent ~= char and os.clock() - t0 < 0.5 do task.wait() end
+        if arma.Parent ~= char then
+            SetMacroStatus("No pudo sacarla")
+            return
         end
 
-        local char = player.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not char or not hum or hum.Health <= 0 then
-            task.wait(0.15)
-            continue
+        if Macro.EquipWait > 0 then task.wait(Macro.EquipWait) end
+        if arma.Parent ~= char or arma.Enabled == false then
+            hum:UnequipTools()
+            SetMacroStatus("Arma no lista")
+            return
         end
 
-        local targetPart = macroPickSilentTarget()
-        if not targetPart then
-            if not silentAimManualEnabled and not silentAimFovEnabled and not autoShootEnabled and not autoShootAgresivoEnabled then
-                getgenv().CKOHUBTargetPart = nil
-            end
-            task.wait(0.12)
-            continue
-        end
-
-        local weapon = macroFindWeapon()
-        if not weapon or not weapon:IsA("Tool") then
-            task.wait(0.2)
-            continue
-        end
-
-        macroBusy = true
-        local ok = pcall(function()
-            getgenv().CKOHUBTargetPart = targetPart
-            -- Si el arma esta en backpack, equipar
-            if weapon.Parent ~= char then
-                hum:EquipTool(weapon)
-                local t0 = os.clock()
-                while weapon.Parent ~= char and os.clock() - t0 < 0.5 do
-                    task.wait()
+        -- Silent Aim: apunta al enemigo más cercano (team check)
+        local targetPart = nil
+        do
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            local head = char:FindFirstChild("Head")
+            if hrp then
+                local myPos = hrp.Position
+                local origin = head and head.Position or myPos
+                local best = math.huge
+                local partPref = silentAimTargetPart or "Cabeza"
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= player and esEnemigoValido(p) and p.Character then
+                        local parts = {}
+                        if partPref == "Cabeza" then
+                            local h = p.Character:FindFirstChild("Head")
+                            if h then table.insert(parts, h) end
+                        elseif partPref == "Torso" then
+                            for _, n in ipairs({ "UpperTorso", "Torso", "HumanoidRootPart" }) do
+                                local part = p.Character:FindFirstChild(n)
+                                if part and part:IsA("BasePart") then table.insert(parts, part) end
+                            end
+                        else
+                            for _, part in ipairs(p.Character:GetChildren()) do
+                                if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                                    table.insert(parts, part)
+                                end
+                            end
+                        end
+                        for _, part in ipairs(parts) do
+                            local dist = (part.Position - myPos).Magnitude
+                            if dist < best then
+                                params.FilterDescendantsInstances = { char, p.Character }
+                                if not workspace:Raycast(origin, part.Position - origin, params) then
+                                    best = dist
+                                    targetPart = part
+                                end
+                            end
+                        end
+                    end
                 end
             end
-            if weapon.Parent ~= char then
-                getgenv().CKOHUBTargetPart = nil
-                return
-            end
-            if MACRO_EQUIP_WAIT > 0 then task.wait(MACRO_EQUIP_WAIT) end
+        end
+        if targetPart then
+            getgenv().CKOHUBTargetPart = targetPart
+        end
 
-            local tp = macroPickSilentTarget()
-            if tp then getgenv().CKOHUBTargetPart = tp end
+        SetMacroStatus("Disparando")
+        pcall(function() arma:Activate() end)
+        if mouse1click then pcall(mouse1click) end
+        Macro.LastShot = os.clock()
 
-            pcall(function() weapon:Activate() end)
-            if MACRO_EXTRA_CLICK and mouse1click then
-                pcall(mouse1click)
-            end
-            macroLastShot = os.clock()
+        local okPing, ping = pcall(function() return player:GetNetworkPing() end)
+        ping = (okPing and ping or 0.05) * 2
+        task.wait(math.max(Macro.UnequipDelay, ping + Macro.PingMargin))
 
-            local okPing, ping = pcall(function() return player:GetNetworkPing() end)
-            ping = (okPing and ping or 0.05) * 2
-            local waitT = math.max(MACRO_UNEQUIP_DELAY, ping + MACRO_PING_MARGIN)
-            task.wait(waitT)
-
-            pcall(function() hum:UnequipTools() end)
-
-            if not silentAimManualEnabled and not silentAimFovEnabled and not autoShootEnabled and not autoShootAgresivoEnabled then
-                getgenv().CKOHUBTargetPart = nil
-            end
-        end)
-        if not ok then
+        hum:UnequipTools()
+        if not silentAimManualEnabled and not silentAimFovEnabled and not autoShootEnabled and not autoShootAgresivoEnabled then
             getgenv().CKOHUBTargetPart = nil
         end
-        macroBusy = false
-        task.wait(0.05)
+        SetMacroStatus("Listo: " .. arma.Name)
+    end)
+    if not ok then SetMacroStatus("Error: " .. tostring(err):sub(1, 40)) end
+    Macro.Busy = false
+end
+
+Tabs.Aim:Button({
+    Title = "Elegir arma en mano",
+    Desc = "Saca el arma y pulsa aquí",
+    Callback = function()
+        local char = player.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        if tool then
+            Macro.WeaponName = tool.Name
+            SetMacroStatus("Arma fijada: " .. tool.Name)
+        else
+            SetMacroStatus("No tienes arma en mano")
+        end
+    end
+})
+
+Tabs.Aim:Button({
+    Title = "Autodetectar arma",
+    Desc = "Vuelve a buscar el arma sola",
+    Callback = function()
+        Macro.WeaponName = nil
+        SetMacroStatus("Autodetección activa")
+    end
+})
+
+Tabs.Aim:Slider({
+    Title = "Retardo al guardar",
+    Step = 0.01,
+    Value = { Min = 0.05, Max = 0.5, Default = 0.1 },
+    Callback = function(v) Macro.UnequipDelay = v end
+})
+
+Tabs.Aim:Slider({
+    Title = "Enfriamiento entre disparos",
+    Step = 0.05,
+    Value = { Min = 0.3, Max = 3, Default = 0.9 },
+    Callback = function(v) Macro.ShotCooldown = v end
+})
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if not Macro.Enabled or processed then return end
+    if input.UserInputType == Enum.UserInputType.Touch then
+        macroTouches[input] = { pos = input.Position, t = os.clock() }
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1 and not Macro.TouchOnly then
+        task.spawn(macroEjecutar)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    local info = macroTouches[input]
+    if not info then return end
+    macroTouches[input] = nil
+    if Macro.Enabled
+    and (input.Position - info.pos).Magnitude < 20
+    and os.clock() - info.t < 0.25 then
+        task.spawn(macroEjecutar)
     end
 end)
 
@@ -2245,7 +2280,7 @@ task.spawn(function()
             if closestTargetPart then
                 getgenv().CKOHUBTargetPart = closestTargetPart
             else
-                if not autoShootEnabled and not autoShootAgresivoEnabled and not macroBusy then
+                if not autoShootEnabled and not autoShootAgresivoEnabled and not Macro.Busy then
                     getgenv().CKOHUBTargetPart = nil
                 end
             end
